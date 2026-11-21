@@ -23,9 +23,13 @@ DEFAULT_EMU = (pathlib.Path(__file__).parent
                / "esp-emu/esp-emu-1.2.0-x86_64-unknown-linux-gnu/esp-emu")
 
 # (id, regex, human description). Any hit fails the run.
+#
+# NOTE: a LittleFS mount failure is deliberately NOT in this list by default. Verified on
+# real silicon 2026-11-21: an ESP32-S3 given a blank filesystem partition FORMATS it and
+# mounts successfully, while esp-emulator reports "Corrupted dir pair" and never formats.
+# Failing on that would reject perfectly valid images. It only indicates a real defect when
+# the caller supplied a filesystem image that still refused to mount - see --expect-filesystem.
 FAILURE_MARKERS = [
-    ("littlefs_mount", r"esp_littlefs:.*(mount failed|Failed to initialize)",
-     "LittleFS did not mount - filesystem partition missing, wrong offset, or wrong size"),
     ("panic", r"Guru Meditation|panic'ed|abort\(\) was called", "Firmware panicked"),
     ("boot_loop", r"rst:0x[0-9a-f]+ \(.*(PANIC|WDT|BROWNOUT)", "Reset for a bad reason"),
     ("nvs_fail", r"nvs_flash_init failed|NVS partition.*not found", "NVS unavailable"),
@@ -88,6 +92,10 @@ def main():
     ap.add_argument("--log", type=pathlib.Path, help="Write the full captured console")
     ap.add_argument("--emu-arg", action="append", default=[],
                     help="Extra arg passed through to esp-emu (repeatable)")
+    ap.add_argument("--expect-filesystem", action="store_true",
+                    help="You supplied a filesystem image; treat a mount failure as FAIL. "
+                         "Without this, a mount failure is informational - real silicon "
+                         "formats a blank partition and recovers, the emulator does not.")
     args = ap.parse_args()
 
     if bool(args.image) == bool(args.part):
@@ -121,7 +129,15 @@ def main():
     if args.log:
         args.log.write_text(out)
 
-    failures = [(i, d) for i, rx, d in FAILURE_MARKERS if re.search(rx, out)]
+    markers = list(FAILURE_MARKERS)
+    if args.expect_filesystem:
+        markers.append(("littlefs_mount",
+                        r"esp_littlefs:.*(mount failed|Failed to initialize)",
+                        "A filesystem image was supplied but LittleFS still did not mount "
+                        "- wrong offset, wrong size, or corrupt image"))
+    failures = [(i, d) for i, rx, d in markers if re.search(rx, out)]
+    fs_note = (not args.expect_filesystem
+               and re.search(r"esp_littlefs:.*(mount failed|Failed to initialize)", out))
     alive = [i for i, rx, _ in LIVENESS_MARKERS if re.search(rx, out)]
 
     print("=" * 70)
@@ -144,6 +160,12 @@ def main():
         print("VERDICT: PASS (for the checks this backend can make)")
         print("  Reached application code; no failure markers.")
 
+    if fs_note:
+        print("\nNOTE: LittleFS did not mount. NOT counted as a failure - real ESP32-S3")
+        print("  silicon formats a blank filesystem partition and recovers, while the")
+        print("  emulator does not (verified on hardware 2026-11-21). Pass")
+        print("  --expect-filesystem if you supplied a filesystem image and want this to fail.")
+
     print("\nNOT VERIFIED by this backend - these are untested, not passing:")
     for item in NOT_VERIFIED:
         print(f"  - {item}")
@@ -155,6 +177,7 @@ def main():
             "placed": [{"offset": hex(o), "bytes": n, "file": p} for o, n, p in placed],
             "failures": [{"id": i, "description": d} for i, d in failures],
             "liveness": alive,
+            "littlefs_mount_failed": bool(fs_note) or any(i == "littlefs_mount" for i, _ in failures),
             "not_verified": NOT_VERIFIED,
         }, indent=2) + "\n")
 

@@ -36,23 +36,37 @@ Exit codes: `0` PASS · `1` FAIL · `2` CANNOT_VERIFY.
 
 Overlapping or overrunning components are rejected before anything boots.
 
-## Worked example — the bug this was built for
+## A false positive, and how it was caught
 
-A Meshtastic build installed into the wrong partition layout boots fine and dies on the
-first setting you change. Here is the discriminator, using the same unmodified vendor
-binary both times:
+The first version of this tool failed any image whose LittleFS didn't mount. That was
+**wrong**, and checking it against real silicon is what proved it:
 
-| Image | Verdict |
+- The emulator, given a **blank** filesystem partition, reports `Corrupted dir pair` →
+  `Failed to initialize LittleFS` and gives up.
+- Real ESP32-S3 silicon, given the same blank partition, **formats it and mounts
+  successfully**. Confirmed by dumping the partition off a board afterwards and finding a
+  valid LittleFS superblock (`littlefs` magic at offset `0x8`).
+
+So a perfectly good shipping image was being rejected. A mount failure is now
+**informational by default**, and only a failure with `--expect-filesystem`, which says
+*"I supplied a filesystem image, so a mount failure is a real defect."*
+
+| Invocation | Verdict |
 |---|---|
-| `factory.bin` alone — filesystem partition blank | **FAIL** · `esp_littlefs: mount failed (-84)` |
-| `factory.bin` + `ota.bin` @ `0x340000` + `littlefs.bin` @ `0x670000` | **PASS** |
+| `factory.bin` alone | **PASS**, with a note that LittleFS didn't mount |
+| `factory.bin` alone + `--expect-filesystem` | **FAIL** — you claimed an FS, it didn't mount |
+| `factory.bin` + `ota.bin` + `littlefs.bin` at their offsets | **PASS**, clean mount |
 
-No firmware modification, no CI-specific build, no hardware.
+This is the whole reason the tool reports what it *cannot* verify. An emulator is a model,
+models diverge from silicon, and the divergences are not always in the safe direction.
+**Validate the harness against hardware before trusting it**, which is advice this project
+had to take before it was a day old.
 
 ## What it checks
 
-**Failure markers** — LittleFS mount failure, panic / `Guru Meditation` / `abort()`,
-reset for a bad reason (PANIC/WDT/BROWNOUT), NVS init failure, partition table rejected.
+**Failure markers** — panic / `Guru Meditation` / `abort()`, reset for a bad reason
+(PANIC/WDT/BROWNOUT), NVS init failure, partition table rejected. LittleFS mount failure
+only with `--expect-filesystem` (see above).
 
 **Liveness** — IDF or Arduino log output, i.e. proof application code was reached. Without
 it the verdict is `CANNOT_VERIFY`.
@@ -90,10 +104,13 @@ Early. Developed against an M5Stack Cardputer ADV (ESP32-S3, 8 MiB) running Mesh
 deliberately small and conservative; additions welcome, but a marker that produces false
 failures is worse than a missing one.
 
-**Known unverified:** whether the emulator's LittleFS behaviour matches real silicon in
-every case. The negative control above is a genuinely incomplete image, so failing it is
-correct — but "the emulator agrees with hardware" is an untested claim, and this README
-will not pretend otherwise.
+**Verified against hardware:** the blank-filesystem divergence described above (M5Stack
+Cardputer ADV, ESP32-S3, Meshtastic 2.8.2). Config written over the CLI survived a reboot,
+and the filesystem partition read back off the board contained a valid LittleFS superblock
+— so the board had formatted and mounted it while the emulator had not.
+
+**Still unverified:** every other respect in which the emulator may differ from silicon.
+One divergence found in the first day of use is not a reason to assume it's the only one.
 
 ## License
 
