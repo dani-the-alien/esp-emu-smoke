@@ -1,0 +1,74 @@
+name: emu-smoke
+
+# Self-test: proves the harness still discriminates a good flash layout from a broken one.
+# Runs entirely on a GitHub-hosted runner - no board, no self-hosted runner, no secrets.
+#
+# NOTE for anyone adapting this: do NOT move this to a self-hosted runner attached to real
+# hardware and then run it on pull_request. That gives anyone who opens a PR code execution
+# on the machine holding your boards.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # esp-emulator is young and moving fast; catch upstream breakage rather than
+    # discovering it the next time someone needs the harness.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  EMU_VERSION: "1.2.0"
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch esp-emulator (checksum verified)
+        run: |
+          set -euo pipefail
+          TARBALL="esp-emu-${EMU_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          BASE="https://github.com/espressif/esp-emulator/releases/download/v${EMU_VERSION}"
+          curl -sSLf -o "$TARBALL" "$BASE/$TARBALL"
+          curl -sSLf -o SHA256SUMS "$BASE/SHA256SUMS"
+          grep "$TARBALL" SHA256SUMS | sha256sum -c -
+          mkdir -p esp-emu && tar xzf "$TARBALL" -C esp-emu
+          find esp-emu -name esp-emu -type f -exec chmod +x {} +
+
+      - name: Build fixtures
+        # A tiny synthetic pair would not exercise anything, so the self-test needs a real
+        # firmware image. Until a small public fixture is vendored, this step is the
+        # integration point for whatever image you want continuously validated.
+        run: |
+          echo "::notice::No fixture image vendored yet - see README 'Status'."
+          echo "Add a known-good image plus its components here, then run both controls."
+
+      - name: Harness self-test (arguments and image assembly)
+        run: |
+          set -euo pipefail
+          python emu_smoke.py --help > /dev/null
+
+          fail() { echo "::error::$1"; exit 1; }
+          head -c 1024 /dev/zero > /tmp/x1.bin
+
+          python emu_smoke.py --image a.bin --part 0x0=b.bin 2>/dev/null \
+            && fail "accepted both --image and --part" || true
+          python emu_smoke.py 2>/dev/null \
+            && fail "accepted neither --image nor --part" || true
+
+          # Layout validation must work without the emulator present.
+          python emu_smoke.py --part 0x0=/tmp/x1.bin --part 0x100=/tmp/x1.bin 2>&1 \
+            | grep -q "overlaps" || fail "did not reject overlapping components"
+          python emu_smoke.py --part 0x7FFFFF=/tmp/x1.bin 2>&1 \
+            | grep -q "overruns" || fail "did not reject component past end of flash"
+
+          echo "arguments and assembly validation OK"
