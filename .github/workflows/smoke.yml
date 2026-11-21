@@ -66,9 +66,18 @@ jobs:
             && fail "accepted neither --image nor --part" || true
 
           # Layout validation must work without the emulator present.
-          python emu_smoke.py --part 0x0=/tmp/x1.bin --part 0x100=/tmp/x1.bin 2>&1 \
-            | grep -q "overlaps" || fail "did not reject overlapping components"
-          python emu_smoke.py --part 0x7FFFFF=/tmp/x1.bin 2>&1 \
-            | grep -q "overruns" || fail "did not reject component past end of flash"
+          # NB: capture into a variable rather than piping into grep. emu_smoke.py exits 1
+          # when it correctly rejects an image, and under `set -o pipefail` that non-zero
+          # status wins over grep's success - inverting the assertion.
+          expect_output() {   # expect_output <needle> <args...>
+            local needle="$1"; shift
+            local out; out="$(python emu_smoke.py "$@" 2>&1 || true)"
+            case "$out" in
+              *"$needle"*) ;;
+              *) echo "$out"; fail "expected '$needle' from: emu_smoke.py $*" ;;
+            esac
+          }
+          expect_output "overlaps" --part 0x0=/tmp/x1.bin --part 0x100=/tmp/x1.bin
+          expect_output "overruns" --part 0x7FFFFF=/tmp/x1.bin
 
           echo "arguments and assembly validation OK"
